@@ -696,12 +696,13 @@ function init() {
     });
   }
 
-  function displayChapter(index) {
-    if (index < 0 || index >= chapterCount) return;
-    currentChapterIdx = index;
-    loadChapter(index);
-    saveState();
-  }
+   function displayChapter(index) {
+     if (index < 0 || index >= chapterCount) return;
+     currentChapterIdx = index;
+     BOOK_STATE.scrollPercent = 0; // start new chapter at top
+     loadChapter(index);
+     saveState();
+   }
 
   function updateNavButtons() {
     prevBtn.disabled = currentChapterIdx <= 0;
