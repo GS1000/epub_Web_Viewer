@@ -30,6 +30,28 @@ Many EPUB readers only translate selected text. I wanted a simple way to read en
 
 * Android 8.0 (API 26) or newer
 
+## Screenshots
+
+### 1. Import and manage your EPUB library
+
+<p align="center">
+  <img src="screenshot/library_empty.jpg.jpg" width="250">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="screenshot/library.jpg.jpg" width="250">
+</p>
+
+### 2. Open any chapter in your browser
+
+<p align="center">
+  <img src="screenshot/reader-original.jpg.jpg" width="250">
+</p>
+
+### 3. Translate with Chrome's built-in translation
+
+<p align="center">
+  <img src="screenshot/translate-menu.jpg.jpg" width="250">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="screenshot/reader-translated.jpg.jpg" width="250">
+</p>
+
 ## Download
 
 Download the latest APK from the **Releases** section.
