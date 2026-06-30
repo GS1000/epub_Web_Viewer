@@ -11,6 +11,9 @@ data class BookMetadata(
     val readerWidth: Int = 760,
     val theme: String = "black",   // one of presets, or "custom"
     val customBg: String? = null,  // e.g. "#1a2b3c" if theme == "custom"
-    val customTextColor: String? = null, // added: custom text colour
-    val lastReadTimestamp: Long = System.currentTimeMillis()
+    val customTextColor: String? = null,
+    val lastReadTimestamp: Long = System.currentTimeMillis(),
+    val pinned: Boolean = false,   // new: pinned status
+    val coverImagePath: String? = null, // new: relative path to cover image inside book folder, e.g. "cover.jpg"
+    val importTimestamp: Long = System.currentTimeMillis() // new: time when book was imported
 )

@@ -18,6 +18,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _sleepDelaySeconds = MutableStateFlow(repository.getSleepDelaySeconds())
     val sleepDelaySeconds: StateFlow<Int> = _sleepDelaySeconds.asStateFlow()
 
+    private val _sortOrder = MutableStateFlow(repository.getSortOrder())
+    val sortOrder: StateFlow<String> = _sortOrder.asStateFlow()
+
     fun setSleepEnabled(enabled: Boolean) {
         viewModelScope.launch {
             repository.setSleepEnabled(enabled)
@@ -32,12 +35,21 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun setSortOrder(order: String) {
+        viewModelScope.launch {
+            repository.setSortOrder(order)
+            _sortOrder.value = order
+        }
+    }
+
     fun resetToDefaults() {
         viewModelScope.launch {
             repository.setSleepEnabled(true)
             repository.setSleepDelaySeconds(30)
+            repository.setSortOrder("last_read_desc")
             _sleepEnabled.value = true
             _sleepDelaySeconds.value = 30
+            _sortOrder.value = "last_read_desc"
         }
     }
 }

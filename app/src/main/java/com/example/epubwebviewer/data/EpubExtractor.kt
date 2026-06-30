@@ -1,5 +1,6 @@
 package com.example.epubwebviewer.data
 
+import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
@@ -53,6 +54,38 @@ class EpubExtractor(private val context: Context) {
         val chaptersDir = File(bookDir, "chapters")
         chaptersDir.mkdirs()
 
+        // ----- Determine cover image -----
+        var coverImagePath: String? = null
+        val coverId = findCoverId(allItems, opfFile)
+        if (coverId != null) {
+            val coverItem = allItems[coverId]
+            val href = coverItem?.get("href")
+            if (href != null) {
+                val coverFile = resolveFile(opfDir, href)
+                if (coverFile != null && coverFile.exists()) {
+                    val dest = File(bookDir, "cover.jpg")
+                    coverFile.copyTo(dest, overwrite = true)
+                    coverImagePath = "cover.jpg"
+                }
+            }
+        }
+
+        // Fallback: if no cover found, try the first image from the spine
+        if (coverImagePath == null) {
+            for (id in spineIds) {
+                val item = allItems[id] ?: continue
+                val href = item["href"] ?: continue
+                val file = File(opfDir, href)
+                if (file.exists() && file.extension.lowercase() in listOf("jpg", "jpeg", "png", "gif", "webp")) {
+                    val dest = File(bookDir, "cover.jpg")
+                    file.copyTo(dest, overwrite = true)
+                    coverImagePath = "cover.jpg"
+                    break
+                }
+            }
+        }
+
+        // ----- Process spine items (chapters) -----
         val chapterContents = mutableListOf<String>()
         val totalItems = spineIds.size
         var processed = 0
@@ -107,11 +140,18 @@ class EpubExtractor(private val context: Context) {
             chapterFile.writeText(content)
         }
 
-        // Create metadata object
+        // ----- Create metadata object with new fields -----
+        // Extract display name: remove .epub extension and take the last segment
+        val displayName = context.contentResolver.getDisplayName(uri) ?: uri.lastPathSegment ?: "Unknown"
+        val title = displayName.removeSuffix(".epub").removeSuffix(".EPUB")
+
         val metadata = BookMetadata(
             id = bookId,
-            title = uri.lastPathSegment ?: "Unknown EPUB",
-            chapterCount = chapterContents.size
+            title = title,
+            chapterCount = chapterContents.size,
+            importTimestamp = System.currentTimeMillis(),
+            coverImagePath = coverImagePath,
+            pinned = false
         )
 
         // Generate the lightweight index.html
@@ -165,10 +205,24 @@ class EpubExtractor(private val context: Context) {
             val attrs = mutableMapOf<String, String>()
             attrs["href"] = el.attr("href")
             attrs["media-type"] = el.attr("media-type")
+            // Also store properties if present
+            val props = el.attr("properties")
+            if (props.isNotBlank()) attrs["properties"] = props
             items[id] = attrs
         }
         val spineIds = doc.select("spine > itemref").map { it.attr("idref") }
         return spineIds to items
+    }
+
+    private fun findCoverId(allItems: Map<String, Map<String, String>>, opfFile: File): String? {
+        // Look for an item with properties containing "cover-image" or id="cover"
+        for ((id, attrs) in allItems) {
+            val props = attrs["properties"] ?: ""
+            if (props.contains("cover-image") || id.equals("cover", ignoreCase = true)) {
+                return id
+            }
+        }
+        return null
     }
 
     private fun resolveFile(baseDir: File, href: String): File? {
@@ -178,8 +232,10 @@ class EpubExtractor(private val context: Context) {
         } catch (e: Exception) { null }
     }
 
-    // ---------- HTML generation (updated) ----------
+    // ---------- HTML generation (unchanged except for metadata) ----------
     private fun generateReaderHtml(bookId: String, metadata: BookMetadata): String {
+        // This is the same as before, but we pass the updated metadata.
+        // The HTML generation does not change because it uses metadata fields that are still present.
         return """
 <!DOCTYPE html>
 <html lang="en">
@@ -796,6 +852,17 @@ function init() {
     }
 }
 
+fun ContentResolver.getDisplayName(uri: Uri): String? {
+    var name: String? = null
+    query(uri, null, null, null, null)?.use { cursor ->
+        val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+        if (nameIndex != -1 && cursor.moveToFirst()) {
+            name = cursor.getString(nameIndex)
+        }
+    }
+    return name
+}
+
 // ---------- Extension function to serialise metadata to JSON ----------
 fun BookMetadata.toJson(): String {
     return """
@@ -811,7 +878,11 @@ fun BookMetadata.toJson(): String {
   "theme": "$theme",
   "customBg": ${customBg?.let { "\"$it\"" } ?: "null"},
   "customTextColor": ${customTextColor?.let { "\"$it\"" } ?: "null"},
-  "lastReadTimestamp": $lastReadTimestamp
+  "lastReadTimestamp": $lastReadTimestamp,
+  "pinned": $pinned,
+  "coverImagePath": ${coverImagePath?.let { "\"$it\"" } ?: "null"},
+  "importTimestamp": $importTimestamp
 }
+
     """.trimIndent()
 }

@@ -9,8 +9,11 @@ class SettingsRepository(context: Context) {
     companion object {
         const val KEY_SLEEP_DELAY_SECONDS = "sleep_delay_seconds"
         const val KEY_SLEEP_ENABLED = "sleep_enabled"
+        const val KEY_SORT_ORDER = "sort_order"
+
         private const val DEFAULT_SLEEP_DELAY = 30 // seconds
         private const val DEFAULT_SLEEP_ENABLED = true
+        private const val DEFAULT_SORT_ORDER = "last_read_desc"
     }
 
     fun getSleepDelaySeconds(): Int {
@@ -27,5 +30,13 @@ class SettingsRepository(context: Context) {
 
     fun setSleepEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_SLEEP_ENABLED, enabled).apply()
+    }
+
+    fun getSortOrder(): String {
+        return prefs.getString(KEY_SORT_ORDER, DEFAULT_SORT_ORDER) ?: DEFAULT_SORT_ORDER
+    }
+
+    fun setSortOrder(order: String) {
+        prefs.edit().putString(KEY_SORT_ORDER, order).apply()
     }
 }
