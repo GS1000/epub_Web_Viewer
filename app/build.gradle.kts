@@ -50,7 +50,7 @@ dependencies {
     implementation(libs.androidx.navigation.fragment.ktx)
     implementation(libs.androidx.navigation.ui.ktx)
 
-    implementation("androidx.activity:activity-ktx:1.9.0")
+    implementation("androidx.activity:activity-ktx:1.10.1")
 
     // Compose BOM (ensures consistent versions)
     implementation(platform(libs.androidx.compose.bom))
