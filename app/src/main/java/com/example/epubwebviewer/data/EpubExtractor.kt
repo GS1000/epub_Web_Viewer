@@ -554,6 +554,19 @@ fetch('/api/state')
     if (data && data.currentChapterIdx !== undefined) {
       BOOK_STATE = { ...BOOK_STATE, ...data };
     }
+    // The book title can be renamed from the dashboard after this page was
+    // generated, so the title baked into the HTML below can go stale.
+    // /api/state reflects the live metadata.json, so if it includes a title
+    // (and it differs from what's on screen), refresh the header + tab title.
+    if (data && typeof data.title === 'string' && data.title.length > 0) {
+      const titleEl = document.getElementById('bookTitleDisplay');
+      if (titleEl && titleEl.textContent !== data.title) {
+        titleEl.textContent = data.title;
+      }
+      if (document.title !== data.title) {
+        document.title = data.title;
+      }
+    }
     init();
   })
   .catch(() => init());

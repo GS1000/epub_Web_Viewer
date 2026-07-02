@@ -6,7 +6,9 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import com.example.epubwebviewer.ui.dashboard.DashboardScreen
 import com.example.epubwebviewer.viewmodel.DashboardViewModel
 
@@ -14,15 +16,27 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: DashboardViewModel by viewModels()
 
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
+            if (isGranted) {
+                // Permission granted – notifications can be shown
+            } else {
+                // Permission denied – app still works without notifications
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         // Request notification permission on Android 13+ (optional)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(
-                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-                    REQUEST_NOTIFICATION_PERMISSION
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                notificationPermissionLauncher.launch(
+                    Manifest.permission.POST_NOTIFICATIONS
                 )
             }
         }
@@ -35,25 +49,5 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.stopService()
-    }
-
-    // Correct override signature: Array<String>, not Array<out String>
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_NOTIFICATION_PERMISSION) {
-            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                // Permission granted – notification will appear
-            } else {
-                // Permission denied – notification suppressed, service still works
-            }
-        }
-    }
-
-    companion object {
-        private const val REQUEST_NOTIFICATION_PERMISSION = 1001
     }
 }
