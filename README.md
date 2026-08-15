@@ -35,8 +35,8 @@ Many EPUB readers only translate selected text. I wanted a simple way to read en
 ### 1. Import and manage your EPUB library
 
 <p align="center">
-  <img src="screenshot/library_empty.jpg.jpg" width="250">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="screenshot/library.jpg.jpg" width="250">
+  <img src="screenshot/library_empty_v0.3.jpg" width="250">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="screenshot/library_v0.3.jpg" width="250">
 </p>
 
 ### 2. Open any chapter in your browser
