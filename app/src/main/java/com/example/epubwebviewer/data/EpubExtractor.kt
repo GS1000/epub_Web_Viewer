@@ -45,12 +45,32 @@ class EpubExtractor(private val context: Context) {
         tempEpubFile.delete()
         emit(0.4f)
 
-        val containerFile = File(tempDir, "META-INF/container.xml")
+        var containerFile = File(tempDir, "META-INF/container.xml")
+        if (!containerFile.exists()) {
+            // Exact-case path didn't match — some tools write different casing
+            // (e.g. "meta-inf/Container.xml"). Search for it instead of failing
+            // outright, since the file is very likely present just not where we
+            // expected by exact case.
+            containerFile = tempDir.walkTopDown().firstOrNull {
+                it.isFile &&
+                        it.name.equals("container.xml", ignoreCase = true) &&
+                        it.parentFile?.name?.equals("META-INF", ignoreCase = true) == true
+            } ?: containerFile
+        }
         val opfPath = parseContainerXml(containerFile)
-        val opfDir = File(tempDir, opfPath).parentFile ?: tempDir
+
+        var opfFile = File(tempDir, opfPath)
+        if (!opfFile.exists()) {
+            // Same idea as above: fall back to a case-insensitive filename match
+            // within the whole extracted tree if the exact-case path is wrong.
+            val opfFileName = opfFile.name
+            opfFile = tempDir.walkTopDown().firstOrNull {
+                it.isFile && it.name.equals(opfFileName, ignoreCase = true)
+            } ?: opfFile
+        }
+        val opfDir = opfFile.parentFile ?: tempDir
         emit(0.5f)
 
-        val opfFile = File(tempDir, opfPath)
         val (spineIds, allItems) = parseOpf(opfFile)
         emit(0.6f)
 
@@ -202,7 +222,12 @@ class EpubExtractor(private val context: Context) {
         ZipInputStream(zipFile.inputStream()).use { zis ->
             var entry = zis.nextEntry
             while (entry != null) {
-                val file = File(destDir, entry.name)
+                // Some packaging tools (particularly on Windows) write entry names
+                // with backslashes instead of forward slashes. On Android those are
+                // just characters in a filename, not directory separators, which
+                // silently breaks the expected folder structure (e.g. META-INF/).
+                val normalizedName = entry.name.replace('\\', '/')
+                val file = File(destDir, normalizedName)
                 // Zip Slip protection: make sure the entry can't escape destDir via "../"
                 if (!file.canonicalPath.startsWith(canonicalDestDir + File.separator) &&
                     file.canonicalPath != canonicalDestDir
