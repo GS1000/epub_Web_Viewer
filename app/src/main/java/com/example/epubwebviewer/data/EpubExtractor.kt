@@ -9,8 +9,10 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import org.jsoup.parser.Parser
 import java.io.File
 import java.io.FileOutputStream
+import java.net.URLDecoder
 import java.util.UUID
 import java.util.zip.ZipInputStream
 
@@ -33,7 +35,13 @@ class EpubExtractor(private val context: Context) {
 
         val tempDir = File(context.cacheDir, "epub_extract_${UUID.randomUUID()}")
         tempDir.mkdirs()
-        unzip(tempEpubFile, tempDir)
+        try {
+            unzip(tempEpubFile, tempDir)
+        } catch (e: Exception) {
+            tempDir.deleteRecursively()
+            tempEpubFile.delete()
+            throw Exception("This file doesn't look like a valid EPUB (couldn't unzip it)", e)
+        }
         tempEpubFile.delete()
         emit(0.4f)
 
@@ -90,12 +98,27 @@ class EpubExtractor(private val context: Context) {
         val totalItems = spineIds.size
         var processed = 0
 
+        val htmlLikeMediaTypes = listOf("application/xhtml+xml", "text/html", "application/html")
+        val htmlLikeExtensions = listOf("xhtml", "html", "htm", "xht")
+
         for (id in spineIds) {
             val item = allItems[id] ?: continue
             val href = item["href"] ?: continue
             val file = File(opfDir, href)
-            if (file.exists() && file.extension.lowercase() in listOf("xhtml", "html", "htm")) {
-                val doc: Document = Jsoup.parse(file, "UTF-8")
+            val mediaType = item["media-type"]?.lowercase() ?: ""
+            val isHtmlLike = mediaType in htmlLikeMediaTypes ||
+                    (mediaType.isBlank() && file.extension.lowercase() in htmlLikeExtensions)
+
+            if (file.exists() && isHtmlLike) {
+                // Prefer the strict XML parser (correct for well-formed XHTML), but
+                // some "XHTML" files in the wild are really just HTML soup with an
+                // .xhtml extension — fall back to the lenient HTML parser rather
+                // than failing the whole import over one malformed chapter.
+                val doc: Document = try {
+                    Jsoup.parse(file, "UTF-8", "", Parser.xmlParser())
+                } catch (e: Exception) {
+                    Jsoup.parse(file, "UTF-8")
+                }
 
                 // Remove scripts and event handlers
                 doc.select("script").remove()
@@ -107,7 +130,8 @@ class EpubExtractor(private val context: Context) {
 
                 // Handle images: copy to media/ and fix src
                 doc.select("img").forEach { img ->
-                    val src = img.attr("src")
+                    val rawSrc = img.attr("src")
+                    val src = if (rawSrc.isNotBlank()) decodeHref(rawSrc) else rawSrc
                     if (src.isNotBlank() && !src.startsWith("http")) {
                         var imgFile = resolveFile(opfDir, src)
                         if (imgFile == null) imgFile = resolveFile(file.parentFile ?: opfDir, src)
@@ -132,6 +156,12 @@ class EpubExtractor(private val context: Context) {
             }
             processed++
             emit(0.6f + 0.3f * (processed.toFloat() / totalItems))
+        }
+
+        if (chapterContents.isEmpty()) {
+            bookDir.deleteRecursively()
+            tempDir.deleteRecursively()
+            throw Exception("No readable chapters found in this EPUB")
         }
 
         // Write each chapter to a separate file
@@ -168,10 +198,18 @@ class EpubExtractor(private val context: Context) {
 
     // ---------- Helper functions ----------
     private fun unzip(zipFile: File, destDir: File) {
+        val canonicalDestDir = destDir.canonicalPath
         ZipInputStream(zipFile.inputStream()).use { zis ->
             var entry = zis.nextEntry
             while (entry != null) {
                 val file = File(destDir, entry.name)
+                // Zip Slip protection: make sure the entry can't escape destDir via "../"
+                if (!file.canonicalPath.startsWith(canonicalDestDir + File.separator) &&
+                    file.canonicalPath != canonicalDestDir
+                ) {
+                    entry = zis.nextEntry
+                    continue
+                }
                 if (entry.isDirectory) {
                     file.mkdirs()
                 } else {
@@ -191,19 +229,29 @@ class EpubExtractor(private val context: Context) {
     }
 
     private fun parseContainerXml(file: File): String {
-        val doc = Jsoup.parse(file, "UTF-8")
+        if (!file.exists()) {
+            throw Exception("META-INF/container.xml not found in EPUB")
+        }
+        val doc = Jsoup.parse(file, "UTF-8", "", Parser.xmlParser())
         val rootfile = doc.select("rootfile").first()
-            ?: throw Exception("Invalid container.xml")
-        return rootfile.attr("full-path")
+            ?: throw Exception("Invalid container.xml: no <rootfile> entry")
+        val fullPath = rootfile.attr("full-path")
+        if (fullPath.isBlank()) {
+            throw Exception("Invalid container.xml: rootfile has no full-path")
+        }
+        return decodeHref(fullPath)
     }
 
     private fun parseOpf(file: File): Pair<List<String>, Map<String, Map<String, String>>> {
-        val doc = Jsoup.parse(file, "UTF-8")
+        if (!file.exists()) {
+            throw Exception("OPF file not found at expected path: ${file.path}")
+        }
+        val doc = Jsoup.parse(file, "UTF-8", "", Parser.xmlParser())
         val items = mutableMapOf<String, Map<String, String>>()
         doc.select("manifest > item").forEach { el ->
             val id = el.attr("id")
             val attrs = mutableMapOf<String, String>()
-            attrs["href"] = el.attr("href")
+            attrs["href"] = decodeHref(el.attr("href"))
             attrs["media-type"] = el.attr("media-type")
             // Also store properties if present
             val props = el.attr("properties")
@@ -211,11 +259,39 @@ class EpubExtractor(private val context: Context) {
             items[id] = attrs
         }
         val spineIds = doc.select("spine > itemref").map { it.attr("idref") }
+
+        // EPUB2-style cover reference: <meta name="cover" content="some-manifest-id"/>
+        val legacyCoverId = doc.select("metadata > meta[name=cover]").first()?.attr("content")
+        if (!legacyCoverId.isNullOrBlank() && items.containsKey(legacyCoverId)) {
+            items[legacyCoverId] = items.getValue(legacyCoverId) + ("properties" to "cover-image")
+        }
+
+        if (items.isEmpty()) {
+            throw Exception("OPF manifest is empty or could not be parsed")
+        }
+        if (spineIds.isEmpty()) {
+            throw Exception("OPF spine is empty or could not be parsed")
+        }
+
         return spineIds to items
+    }
+
+    /**
+     * EPUB hrefs are URI references and may be percent-encoded (e.g. "chapter%201.xhtml"
+     * for "chapter 1.xhtml"). Decoding here means every downstream File(...) lookup
+     * uses the real on-disk filename instead of the raw encoded string.
+     */
+    private fun decodeHref(href: String): String {
+        return try {
+            URLDecoder.decode(href.replace("+", "%2B"), "UTF-8")
+        } catch (e: Exception) {
+            href
+        }
     }
 
     private fun findCoverId(allItems: Map<String, Map<String, String>>, opfFile: File): String? {
         // Look for an item with properties containing "cover-image" or id="cover"
+        // (the EPUB2 <meta name="cover"> case is already folded into "properties" in parseOpf)
         for ((id, attrs) in allItems) {
             val props = attrs["properties"] ?: ""
             if (props.contains("cover-image") || id.equals("cover", ignoreCase = true)) {
@@ -735,7 +811,10 @@ function init() {
       return;
     }
     fetch(url)
-      .then(res => res.text())
+      .then(res => {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.text();
+      })
       .then(html => {
         chapterContentCache[index] = html;
         displayChapterContent(index, html);

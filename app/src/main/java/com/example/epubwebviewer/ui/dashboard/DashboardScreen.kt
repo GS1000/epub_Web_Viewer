@@ -48,7 +48,16 @@ fun DashboardScreen(
     val pinnedBooks by viewModel.pinnedBooks
     val showProgress by viewModel.showExtractingDialog
     val progress by viewModel.extractionProgress
+    val importError by viewModel.importError
     val context = LocalContext.current
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(importError) {
+        importError?.let { message ->
+            snackbarHostState.showSnackbar(message)
+            viewModel.clearImportError()
+        }
+    }
 
     var showSettings by remember { mutableStateOf(false) }
     val systemDark = isSystemInDarkTheme()
@@ -96,6 +105,7 @@ fun DashboardScreen(
             colorScheme = if (isDark) darkColorScheme() else lightColorScheme()
         ) {
             Scaffold(
+                snackbarHost = { SnackbarHost(snackbarHostState) },
                 topBar = {
                     TopAppBar(
                         title = { Text("EPUB Browser Viewer") },

@@ -48,6 +48,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Order matters here: the reading server (if any) has already flushed the
+        // latest chapter/scroll progress to metadata.json via debounced POSTs while
+        // the user was reading, so it's safe to stop the server first...
         viewModel.stopService()
+        // ...then reload the book list from disk so the dashboard reflects whatever
+        // was just written, instead of showing whatever was loaded before the user
+        // opened the book. This is the fix for the dashboard showing stale progress
+        // (e.g. "chapter 2" when the browser was actually at chapter 14).
+        viewModel.refreshBooks()
     }
 }

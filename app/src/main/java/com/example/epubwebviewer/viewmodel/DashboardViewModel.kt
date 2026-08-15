@@ -14,6 +14,7 @@ import com.example.epubwebviewer.server.ReaderServerService
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 class DashboardViewModel(application: Application) : AndroidViewModel(application) {
@@ -39,6 +40,10 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val _extractionProgress = mutableFloatStateOf(0f)
     val extractionProgress: State<Float> = _extractionProgress
+
+    // Import error (shown as a Snackbar/dialog by the UI, then cleared)
+    private val _importError = mutableStateOf<String?>(null)
+    val importError: State<String?> = _importError
 
     // Sort order
     private var sortOrder by mutableStateOf(settingsRepository.getSortOrder())
@@ -92,11 +97,15 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                 }
                 loadBooks()
             } catch (e: Exception) {
-                // TODO: show error
+                _importError.value = e.message ?: "Couldn't import this EPUB. It may be corrupted or in an unsupported format."
             } finally {
                 _showExtractingDialog.value = false
             }
         }
+    }
+
+    fun clearImportError() {
+        _importError.value = null
     }
 
     fun renameBook(bookId: String, newTitle: String) {
@@ -132,18 +141,29 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun openBook(book: BookMetadata) {
-        if (currentBookId != null && currentBookId != book.id) {
-            stopService()
-        }
-        currentBookId = book.id
-
-        val intent = Intent(context, ReaderServerService::class.java).apply {
-            putExtra(ReaderServerService.EXTRA_BOOK_ID, book.id)
-        }
-        context.startService(intent)
-
         launchJob?.cancel()
         launchJob = viewModelScope.launch {
+            // If a different book's server is currently running, stop it and WAIT for
+            // confirmation (portFlow -> null) before starting the new one. Firing
+            // stopService()+startService() back-to-back without waiting is a race:
+            // the old service's onDestroy() may not have finished nulling things out
+            // before the new onStartCommand() runs, which can leave the browser
+            // pointed at the previous book's port/content.
+            if (currentBookId != null && currentBookId != book.id) {
+                val stopIntent = Intent(context, ReaderServerService::class.java)
+                context.stopService(stopIntent)
+                withTimeoutOrNull(3000) {
+                    ReaderServerService.portFlow.first { it == null }
+                }
+            }
+
+            currentBookId = book.id
+
+            val intent = Intent(context, ReaderServerService::class.java).apply {
+                putExtra(ReaderServerService.EXTRA_BOOK_ID, book.id)
+            }
+            context.startService(intent)
+
             val port = ReaderServerService.portFlow.first { it != null }
             val url = "http://127.0.0.1:$port/"
             val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
