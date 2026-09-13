@@ -14,7 +14,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.URLDecoder
 import java.util.UUID
-import java.util.zip.ZipInputStream
+import java.util.zip.ZipFile
 
 class EpubExtractor(private val context: Context) {
 
@@ -57,16 +57,35 @@ class EpubExtractor(private val context: Context) {
                         it.parentFile?.name?.equals("META-INF", ignoreCase = true) == true
             } ?: containerFile
         }
-        val opfPath = parseContainerXml(containerFile)
 
-        var opfFile = File(tempDir, opfPath)
-        if (!opfFile.exists()) {
-            // Same idea as above: fall back to a case-insensitive filename match
-            // within the whole extracted tree if the exact-case path is wrong.
-            val opfFileName = opfFile.name
+        // Last-resort fallback: container.xml is genuinely missing/unreadable
+        // (some broken exporters drop it entirely). Rather than give up, look
+        // for any *.opf file anywhere in the archive and use that directly —
+        // this is exactly what most "lenient" readers do.
+        var opfFile: File? = null
+        if (containerFile.exists()) {
+            try {
+                val opfPath = parseContainerXml(containerFile)
+                val candidate = File(tempDir, opfPath)
+                opfFile = if (candidate.exists()) {
+                    candidate
+                } else {
+                    val opfFileName = candidate.name
+                    tempDir.walkTopDown().firstOrNull {
+                        it.isFile && it.name.equals(opfFileName, ignoreCase = true)
+                    }
+                }
+            } catch (e: Exception) {
+                // fall through to the blind *.opf search below
+            }
+        }
+        if (opfFile == null || !opfFile.exists()) {
             opfFile = tempDir.walkTopDown().firstOrNull {
-                it.isFile && it.name.equals(opfFileName, ignoreCase = true)
-            } ?: opfFile
+                it.isFile && it.extension.equals("opf", ignoreCase = true)
+            }
+        }
+        if (opfFile == null || !opfFile.exists()) {
+            throw Exception("META-INF/container.xml not found and no .opf file could be located anywhere in the EPUB")
         }
         val opfDir = opfFile.parentFile ?: tempDir
         emit(0.5f)
@@ -113,32 +132,63 @@ class EpubExtractor(private val context: Context) {
             }
         }
 
+        // Second fallback: still nothing — grab literally any image file
+        // extracted from the archive, so a broken/incomplete manifest doesn't
+        // mean "no cover" when perfectly good cover art exists on disk.
+        if (coverImagePath == null) {
+            val anyImage = tempDir.walkTopDown().firstOrNull {
+                it.isFile && it.extension.lowercase() in listOf("jpg", "jpeg", "png", "gif", "webp")
+            }
+            if (anyImage != null) {
+                val dest = File(bookDir, "cover.jpg")
+                anyImage.copyTo(dest, overwrite = true)
+                coverImagePath = "cover.jpg"
+            }
+        }
+
         // ----- Process spine items (chapters) -----
         val chapterContents = mutableListOf<String>()
-        val totalItems = spineIds.size
-        var processed = 0
 
         val htmlLikeMediaTypes = listOf("application/xhtml+xml", "text/html", "application/html")
         val htmlLikeExtensions = listOf("xhtml", "html", "htm", "xht")
 
-        for (id in spineIds) {
+        // Some broken OPFs have an empty/garbled spine even though the manifest
+        // (or the archive itself) clearly contains readable chapters. Rather
+        // than fail the whole import, fall back to every HTML-like manifest
+        // item (in manifest order), or as a last resort every HTML-like file
+        // found anywhere in the archive.
+        var effectiveSpineIds = spineIds
+        if (effectiveSpineIds.isEmpty()) {
+            effectiveSpineIds = allItems.entries
+                .filter { (_, attrs) ->
+                    val mediaType = attrs["media-type"]?.lowercase() ?: ""
+                    val href = attrs["href"] ?: ""
+                    mediaType in htmlLikeMediaTypes ||
+                            (mediaType.isBlank() && File(href).extension.lowercase() in htmlLikeExtensions)
+                }
+                .map { it.key }
+        }
+
+        val totalItems = maxOf(effectiveSpineIds.size, 1)
+        var processed = 0
+
+        for (id in effectiveSpineIds) {
             val item = allItems[id] ?: continue
             val href = item["href"] ?: continue
-            val file = File(opfDir, href)
+            var file = File(opfDir, href)
+            if (!file.exists()) {
+                // Manifest href points somewhere that doesn't exist relative to
+                // the OPF — try to find a same-named file anywhere in the
+                // archive rather than silently dropping the chapter.
+                val fileName = File(href).name
+                file = tempDir.walkTopDown().firstOrNull { it.isFile && it.name == fileName } ?: file
+            }
             val mediaType = item["media-type"]?.lowercase() ?: ""
             val isHtmlLike = mediaType in htmlLikeMediaTypes ||
                     (mediaType.isBlank() && file.extension.lowercase() in htmlLikeExtensions)
 
             if (file.exists() && isHtmlLike) {
-                // Prefer the strict XML parser (correct for well-formed XHTML), but
-                // some "XHTML" files in the wild are really just HTML soup with an
-                // .xhtml extension — fall back to the lenient HTML parser rather
-                // than failing the whole import over one malformed chapter.
-                val doc: Document = try {
-                    Jsoup.parse(file, "UTF-8", "", Parser.xmlParser())
-                } catch (e: Exception) {
-                    Jsoup.parse(file, "UTF-8")
-                }
+                val doc: Document = parseHtmlLikeFile(file)
 
                 // Remove scripts and event handlers
                 doc.select("script").remove()
@@ -172,10 +222,28 @@ class EpubExtractor(private val context: Context) {
 
                 // Extract cleaned body HTML
                 val bodyHtml = doc.body().html()
-                chapterContents.add(bodyHtml)
+                if (bodyHtml.isNotBlank()) {
+                    chapterContents.add(bodyHtml)
+                }
             }
             processed++
             emit(0.6f + 0.3f * (processed.toFloat() / totalItems))
+        }
+
+        // Absolute last resort: manifest/spine gave us nothing usable at all,
+        // but the archive still contains HTML-like files (e.g. spine and
+        // manifest are both empty/corrupt). Grab every such file directly.
+        if (chapterContents.isEmpty()) {
+            val allHtmlFiles = tempDir.walkTopDown()
+                .filter { it.isFile && it.extension.lowercase() in htmlLikeExtensions }
+                .sortedBy { it.path }
+                .toList()
+            for (file in allHtmlFiles) {
+                val doc = parseHtmlLikeFile(file)
+                doc.select("script").remove()
+                val bodyHtml = doc.body().html()
+                if (bodyHtml.isNotBlank()) chapterContents.add(bodyHtml)
+            }
         }
 
         if (chapterContents.isEmpty()) {
@@ -217,11 +285,24 @@ class EpubExtractor(private val context: Context) {
     }.flowOn(Dispatchers.IO)
 
     // ---------- Helper functions ----------
+
+    /**
+     * Unzips using ZipFile (random access via the central directory) rather
+     * than ZipInputStream (sequential, local-header-only). Many real-world
+     * EPUBs are written by packers that leave the local file headers wrong or
+     * incomplete (missing/zero sizes, odd flags, non-standard entry order).
+     * ZipInputStream can then skip, truncate, or throw on entries — including
+     * META-INF/container.xml or the OPF — even though the file is perfectly
+     * valid and opens fine in readers that use ZipFile-style random access.
+     * This is the single biggest cause of "container.xml not found" /
+     * "OPF manifest is empty" on files that other readers open without issue.
+     */
     private fun unzip(zipFile: File, destDir: File) {
         val canonicalDestDir = destDir.canonicalPath
-        ZipInputStream(zipFile.inputStream()).use { zis ->
-            var entry = zis.nextEntry
-            while (entry != null) {
+        ZipFile(zipFile).use { zf ->
+            val entries = zf.entries()
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement()
                 // Some packaging tools (particularly on Windows) write entry names
                 // with backslashes instead of forward slashes. On Android those are
                 // just characters in a filename, not directory separators, which
@@ -232,23 +313,59 @@ class EpubExtractor(private val context: Context) {
                 if (!file.canonicalPath.startsWith(canonicalDestDir + File.separator) &&
                     file.canonicalPath != canonicalDestDir
                 ) {
-                    entry = zis.nextEntry
                     continue
                 }
                 if (entry.isDirectory) {
                     file.mkdirs()
                 } else {
                     file.parentFile?.mkdirs()
-                    file.outputStream().use { fos ->
-                        val buffer = ByteArray(8192)
-                        var bytes = zis.read(buffer)
-                        while (bytes != -1) {
-                            fos.write(buffer, 0, bytes)
-                            bytes = zis.read(buffer)
+                    try {
+                        zf.getInputStream(entry).use { input ->
+                            file.outputStream().use { fos ->
+                                val buffer = ByteArray(8192)
+                                var bytes = input.read(buffer)
+                                while (bytes != -1) {
+                                    fos.write(buffer, 0, bytes)
+                                    bytes = input.read(buffer)
+                                }
+                            }
                         }
+                    } catch (e: Exception) {
+                        // One bad entry (e.g. a genuinely corrupt embedded font)
+                        // shouldn't sink the whole import — skip it and keep going.
                     }
                 }
-                entry = zis.nextEntry
+            }
+        }
+    }
+
+    /**
+     * Some "XHTML" files are really just HTML soup with an .xhtml extension,
+     * and some have a garbled/binary first line where the XML declaration
+     * should be (a known pattern in scraped/converted EPUBs). Try strict XML
+     * first, then strip a bad leading declaration line, then fall back to
+     * the lenient HTML parser rather than failing the whole chapter.
+     */
+    private fun parseHtmlLikeFile(file: File): Document {
+        return try {
+            Jsoup.parse(file, "UTF-8", "", Parser.xmlParser())
+        } catch (e: Exception) {
+            try {
+                val text = file.readText(Charsets.UTF_8)
+                val cleaned = if (text.trimStart().startsWith("<?xml") ) {
+                    // Drop only the first line if it doesn't look like a sane
+                    // XML declaration (e.g. contains control/binary garbage).
+                    val firstLineEnd = text.indexOf('>').let { if (it == -1) 0 else it + 1 }
+                    val firstLine = text.substring(0, firstLineEnd)
+                    if (firstLine.any { it.code in 1..8 || it.code in 14..31 }) {
+                        text.substring(firstLineEnd)
+                    } else {
+                        text
+                    }
+                } else text
+                Jsoup.parse(cleaned, "", Parser.xmlParser())
+            } catch (e2: Exception) {
+                Jsoup.parse(file, "UTF-8")
             }
         }
     }
@@ -271,7 +388,7 @@ class EpubExtractor(private val context: Context) {
         if (!file.exists()) {
             throw Exception("OPF file not found at expected path: ${file.path}")
         }
-        val doc = Jsoup.parse(file, "UTF-8", "", Parser.xmlParser())
+        val doc = parseHtmlLikeFile(file)
         val items = mutableMapOf<String, Map<String, String>>()
         doc.select("manifest > item").forEach { el ->
             val id = el.attr("id")
@@ -283,7 +400,9 @@ class EpubExtractor(private val context: Context) {
             if (props.isNotBlank()) attrs["properties"] = props
             items[id] = attrs
         }
-        val spineIds = doc.select("spine > itemref").map { it.attr("idref") }
+        val spineIds = doc.select("spine > itemref")
+            .map { it.attr("idref") }
+            .filter { it.isNotBlank() && items.containsKey(it) }
 
         // EPUB2-style cover reference: <meta name="cover" content="some-manifest-id"/>
         val legacyCoverId = doc.select("metadata > meta[name=cover]").first()?.attr("content")
@@ -291,13 +410,9 @@ class EpubExtractor(private val context: Context) {
             items[legacyCoverId] = items.getValue(legacyCoverId) + ("properties" to "cover-image")
         }
 
-        if (items.isEmpty()) {
-            throw Exception("OPF manifest is empty or could not be parsed")
-        }
-        if (spineIds.isEmpty()) {
-            throw Exception("OPF spine is empty or could not be parsed")
-        }
-
+        // Note: an empty manifest/spine is no longer fatal here — the caller
+        // (extract()) falls back to manifest-order or whole-archive HTML
+        // scanning when either of these comes back empty.
         return spineIds to items
     }
 
